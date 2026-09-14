@@ -31,6 +31,7 @@ ALTER TABLE monitoring.e02_metrics RENAME COLUMN calcule_le TO calculated_at;
 ALTER TABLE monitoring.e02_metrics ADD COLUMN metric_revision INTEGER;
 ALTER TABLE monitoring.e02_metrics ADD COLUMN metric_version_label TEXT;
 ALTER TABLE monitoring.e02_metrics ADD COLUMN registry_snapshot_hash TEXT;
+ALTER TABLE monitoring.e02_metrics ADD COLUMN last_run_id BIGINT;
 UPDATE monitoring.e02_metrics SET metric_revision = 0, metric_version_label = 'legacy-pre-versioned'
  WHERE metric_revision IS NULL;
 ALTER TABLE monitoring.e02_metrics ALTER COLUMN metric_revision SET NOT NULL;
@@ -62,7 +63,7 @@ BEGIN
     FROM shelly.p1_variable_registry WHERE enabled = true;
 
   INSERT INTO monitoring.e02_metrics (device_id, window_start, window_end, metric_revision, metric_version_label,
-    registry_snapshot_hash, expected_seconds, observed_seconds, missing_seconds, multiple_seconds, completeness_pct,
+    registry_snapshot_hash, last_run_id, expected_seconds, observed_seconds, missing_seconds, multiple_seconds, completeness_pct,
     gap_p50_s, gap_p95_s, gap_p99_s, gap_max_s, gaps_sup_2s, gaps_sup_5s, gaps_sup_60s,
     cycles_complets, cycles_incomplets, window_last_observed_at, window_end_lag_s,
     current_latest_observed_at, current_freshness_s, calculated_at,
@@ -81,7 +82,7 @@ BEGIN
     (SELECT COUNT(DISTINCT obsv.variable_id) FROM obsv WHERE obsv.cycle_id = ok.cycle_id AND NOT EXISTS (SELECT 1 FROM ref WHERE ref.variable_id = obsv.variable_id)) intrus,
     (SELECT COUNT(*) FROM (SELECT variable_id FROM obsv WHERE obsv.cycle_id = ok.cycle_id GROUP BY 1 HAVING COUNT(*) > 1) dd) doublons
    FROM ok)
-  SELECT d.device_id, p_start, p_end, c_rev, c_label, v_hash,
+  SELECT d.device_id, p_start, p_end, c_rev, c_label, v_hash, v_run,
     EXTRACT(EPOCH FROM p_end - p_start)::int,
     COALESCE((SELECT COUNT(*) FROM sec WHERE sec.device_id = d.device_id), 0),
     EXTRACT(EPOCH FROM p_end - p_start)::int - COALESCE((SELECT COUNT(*) FROM sec WHERE sec.device_id = d.device_id), 0)::int,
@@ -115,7 +116,7 @@ BEGIN
     cycles_incomplets=EXCLUDED.cycles_incomplets, window_last_observed_at=EXCLUDED.window_last_observed_at,
     window_end_lag_s=EXCLUDED.window_end_lag_s, current_latest_observed_at=EXCLUDED.current_latest_observed_at,
     current_freshness_s=EXCLUDED.current_freshness_s, calculated_at=now(),
-    registry_snapshot_hash=EXCLUDED.registry_snapshot_hash, metric_version_label=EXCLUDED.metric_version_label,
+    registry_snapshot_hash=EXCLUDED.registry_snapshot_hash, last_run_id=EXCLUDED.last_run_id, metric_version_label=EXCLUDED.metric_version_label,
     cycles_conformes_identite=EXCLUDED.cycles_conformes_identite,
     cycles_avec_manquants=EXCLUDED.cycles_avec_manquants,
     cycles_avec_intrus=EXCLUDED.cycles_avec_intrus, cycles_avec_doublons=EXCLUDED.cycles_avec_doublons;
@@ -126,14 +127,14 @@ BEGIN
   UPDATE monitoring.e02_run_log SET ended_at = now(), devices_ok = v_ok, devices_panne = v_panne,
     result = CASE WHEN v_panne = 0 THEN 'OK' WHEN v_ok = 0 THEN 'PANNE_TOTALE' ELSE 'PANNE_PARTIELLE' END
    WHERE run_id = v_run;
-  RETURN (SELECT result || ' ' || p_start::text || ' (ok=' || v_ok || ', panne=' || v_panne || ')'
+  RETURN (SELECT result || ' ' || p_start::text || ' (ok=' || v_ok || ', panne=' || v_panne || ') run=' || v_run
           FROM monitoring.e02_run_log WHERE run_id = v_run);
 END $$;
 
 -- ============ B4 : vue explicite, triee sur la revision entiere, jamais sur le texte ============
 CREATE OR REPLACE VIEW monitoring.e02_latest AS
 SELECT DISTINCT ON (device_id, window_start, window_end)
-  device_id, window_start, window_end, metric_revision, metric_version_label, registry_snapshot_hash,
+  device_id, window_start, window_end, metric_revision, metric_version_label, registry_snapshot_hash, last_run_id,
   expected_seconds, observed_seconds, missing_seconds, multiple_seconds, completeness_pct,
   gap_p50_s, gap_p95_s, gap_p99_s, gap_max_s, gaps_sup_2s, gaps_sup_5s, gaps_sup_60s,
   cycles_complets, cycles_incomplets, cycles_conformes_identite,
@@ -143,3 +144,4 @@ FROM monitoring.e02_metrics
 ORDER BY device_id, window_start, window_end, metric_revision DESC, calculated_at DESC;
 
 COMMIT;
+
