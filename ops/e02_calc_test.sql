@@ -1,8 +1,17 @@
 WITH fen AS (SELECT '2026-09-14 07:00+01'::timestamptz AS h1, '2026-09-14 08:00+01'::timestamptz AS h2),
 ok AS (SELECT c.* FROM shelly.p1_collection_cycle c CROSS JOIN fen WHERE c.scheduled_at >= fen.h1 AND c.scheduled_at < fen.h2 AND c.cycle_status = 'success'),
 sec AS (SELECT device_id, date_trunc('second', scheduled_at) AS s, COUNT(*) AS n FROM ok GROUP BY 1, 2),
-gaps AS (SELECT device_id, EXTRACT(EPOCH FROM scheduled_at - LAG(scheduled_at) OVER (PARTITION BY device_id ORDER BY scheduled_at)) AS g FROM ok)
-INSERT INTO monitoring.e02_kpi_horaire
+gaps AS (SELECT device_id, EXTRACT(EPOCH FROM scheduled_at - LAG(scheduled_at) OVER (PARTITION BY device_id ORDER BY scheduled_at)) AS g FROM ok),
+ref AS (SELECT variable_id FROM shelly.p1_variable_registry WHERE enabled = true),
+obsv AS (SELECT o.cycle_id, o.variable_id FROM shelly.p1_instantaneous_observation o JOIN ok ON ok.cycle_id = o.cycle_id WHERE o.is_present = true),
+conf AS (
+  SELECT ok.device_id, ok.cycle_id,
+    (SELECT COUNT(*) FROM ref WHERE NOT EXISTS (SELECT 1 FROM obsv WHERE obsv.cycle_id = ok.cycle_id AND obsv.variable_id = ref.variable_id)) AS manquants,
+    (SELECT COUNT(DISTINCT obsv.variable_id) FROM obsv WHERE obsv.cycle_id = ok.cycle_id AND NOT EXISTS (SELECT 1 FROM ref WHERE ref.variable_id = obsv.variable_id)) AS intrus,
+    (SELECT COUNT(*) FROM (SELECT obsv.variable_id FROM obsv WHERE obsv.cycle_id = ok.cycle_id GROUP BY obsv.variable_id HAVING COUNT(*) > 1) d) AS doublons
+  FROM ok
+)
+INSERT INTO monitoring.e02_kpi_horaire (device_id, heure_debut, heure_fin, expected_seconds, observed_seconds, missing_seconds, multiple_seconds, completeness_pct, gap_p50_s, gap_p95_s, gap_p99_s, gap_max_s, gaps_sup_2s, gaps_sup_5s, gaps_sup_60s, cycles_complets, cycles_incomplets, window_last_observed_at, window_end_lag_s, current_latest_observed_at, current_freshness_s, calcule_le, cycles_conformes_identite, cycles_avec_manquants, cycles_avec_intrus, cycles_avec_doublons)
 SELECT o.device_id, fen.h1, fen.h2,
   3600,
   (SELECT COUNT(*) FROM sec WHERE sec.device_id = o.device_id),
@@ -22,7 +31,11 @@ SELECT o.device_id, fen.h1, fen.h2,
   ROUND(EXTRACT(EPOCH FROM fen.h2 - MAX(o.scheduled_at))::numeric, 1),
   (SELECT MAX(scheduled_at) FROM shelly.p1_collection_cycle WHERE cycle_status = 'success'),
   (SELECT ROUND(EXTRACT(EPOCH FROM now() - MAX(scheduled_at))::numeric, 1) FROM shelly.p1_collection_cycle WHERE cycle_status = 'success'),
-  now()
+  now(),
+  (SELECT COUNT(*) FROM conf WHERE conf.device_id = o.device_id AND manquants = 0 AND intrus = 0 AND doublons = 0),
+  (SELECT COUNT(*) FROM conf WHERE conf.device_id = o.device_id AND manquants > 0),
+  (SELECT COUNT(*) FROM conf WHERE conf.device_id = o.device_id AND intrus > 0),
+  (SELECT COUNT(*) FROM conf WHERE conf.device_id = o.device_id AND doublons > 0)
 FROM ok o CROSS JOIN fen
 GROUP BY o.device_id, fen.h1, fen.h2
 ON CONFLICT (device_id, heure_debut) DO UPDATE SET
@@ -33,4 +46,8 @@ ON CONFLICT (device_id, heure_debut) DO UPDATE SET
   gaps_sup_60s = EXCLUDED.gaps_sup_60s, cycles_complets = EXCLUDED.cycles_complets,
   cycles_incomplets = EXCLUDED.cycles_incomplets, window_last_observed_at = EXCLUDED.window_last_observed_at,
   window_end_lag_s = EXCLUDED.window_end_lag_s, current_latest_observed_at = EXCLUDED.current_latest_observed_at,
-  current_freshness_s = EXCLUDED.current_freshness_s, calcule_le = now();
+  current_freshness_s = EXCLUDED.current_freshness_s, calcule_le = now(),
+  cycles_conformes_identite = EXCLUDED.cycles_conformes_identite,
+  cycles_avec_manquants = EXCLUDED.cycles_avec_manquants,
+  cycles_avec_intrus = EXCLUDED.cycles_avec_intrus,
+  cycles_avec_doublons = EXCLUDED.cycles_avec_doublons;
